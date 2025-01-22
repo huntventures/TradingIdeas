@@ -1,0 +1,199 @@
+// This script is the Intellectual Property of Joerg von dem Bruch. 
+// Unauthorized reproduction, modification, or distribution is only permitted by explicit approval.
+//
+//@version=5
+strategy(title="Gaussian Channel [DW] Strategy (Long Only, Exit Below Band)", shorttitle="GC [DW] LongOnly_ExitBelowBand", overlay=true, initial_capital=10000)
+
+//============================================================================
+// 1. Filter function (f_filt9x)
+//----------------------------------------------------------------------------
+// This function implements a multi-pole filter using a recursive approach.
+// It accepts three parameters:
+//   _a : The 'alpha' value controlling the filter's smoothing.
+//   _s : The source input (e.g., price, true range, etc.).
+//   _i : The number of poles (up to 9) used for the filter.
+//
+// The filter uses Pascal-like (binomial) coefficients to replicate the
+// polynomial expansion of (1 - x)^n. At each step, the function references
+// its own past outputs (e.g., _f[1], _f[2], etc.) and scales them by
+// the appropriate binomial-based multiplier. The sign of these terms
+// flips between addition and subtraction in a pattern to achieve the
+// desired smoothing effect.
+//
+// The logic in this section assigns the appropriate multipliers (_m2, _m3, ...)
+// based on the chosen number of poles, then calculates the new filtered
+// value (_f) by combining the new input, older filter outputs, and these
+// binomial-like coefficients. 
+//----------------------------------------------------------------------------
+f_filt9x(_a, _s, _i) =>
+    var float _f = na
+
+    // Multiplier placeholders for 2 through 9 poles
+    int _m2 = 0
+    int _m3 = 0
+    int _m4 = 0
+    int _m5 = 0
+    int _m6 = 0
+    int _m7 = 0
+    int _m8 = 0
+    int _m9 = 0
+    
+    // x = 1 - alpha (used repeatedly to compute polynomial expansions)
+    float _x = 1.0 - _a
+    
+    // Each multiplier is derived from binomial coefficients for up to 9 poles.
+    // Depending on _i (the number of poles), we assign the relevant values:
+    _m2 := _i == 9 ? 36  : _i == 8 ? 28 : _i == 7 ? 21 : _i == 6 ? 15 : _i == 5 ? 10 : _i == 4 ? 6 : _i == 3 ? 3 : _i == 2 ? 1 : 0
+    _m3 := _i == 9 ? 84  : _i == 8 ? 56 : _i == 7 ? 35 : _i == 6 ? 20 : _i == 5 ? 10 : _i == 4 ? 4 : _i == 3 ? 1 : 0
+    _m4 := _i == 9 ? 126 : _i == 8 ? 70 : _i == 7 ? 35 : _i == 6 ? 15 : _i == 5 ? 5  : _i == 4 ? 1 : 0
+    _m5 := _i == 9 ? 126 : _i == 8 ? 56 : _i == 7 ? 21 : _i == 6 ? 6  : _i == 5 ? 1  : 0
+    _m6 := _i == 9 ? 84  : _i == 8 ? 28 : _i == 7 ? 7  : _i == 6 ? 1  : 0
+    _m7 := _i == 9 ? 36  : _i == 8 ? 8  : _i == 7 ? 1  : 0
+    _m8 := _i == 9 ? 9   : _i == 8 ? 1  : 0
+    _m9 := _i == 9 ? 1   : 0
+    
+    // basePow = alpha^i
+    float basePow = math.pow(_a, float(_i))
+
+    // The recursive formula combines:
+    //   - The new input scaled by alpha^i.
+    //   - Past filtered outputs scaled by powers of (1 - alpha) and
+    //     the binomial-like multipliers.
+    _f := basePow * nz(_s)
+       + _i * _x * nz(_f[1])
+       - (_i >= 2 ? _m2 * math.pow(_x, 2.0) * nz(_f[2]) : 0)
+       + (_i >= 3 ? _m3 * math.pow(_x, 3.0) * nz(_f[3]) : 0)
+       - (_i >= 4 ? _m4 * math.pow(_x, 4.0) * nz(_f[4]) : 0)
+       + (_i >= 5 ? _m5 * math.pow(_x, 5.0) * nz(_f[5]) : 0)
+       - (_i >= 6 ? _m6 * math.pow(_x, 6.0) * nz(_f[6]) : 0)
+       + (_i >= 7 ? _m7 * math.pow(_x, 7.0) * nz(_f[7]) : 0)
+       - (_i >= 8 ? _m8 * math.pow(_x, 8.0) * nz(_f[8]) : 0)
+       + (_i == 9 ? _m9 * math.pow(_x, 9.0) * nz(_f[9]) : 0)
+
+//============================================================================
+// 2. 9-var declaration function (f_pole)
+//----------------------------------------------------------------------------
+// This function orchestrates the multiple calls to f_filt9x() for up to
+// 9 poles. It returns two values in an array:
+//   1) _final : The final pole output, which depends on the user-selected
+//               number of poles _i.
+//   2) _f1    : The 1-pole output, often used as part of a "fast mode"
+//               average in the main script.
+//
+// By calling f_filt9x() for each possible pole count from 1 to 9, and
+// returning only what we need (_final), this function centralizes the
+// logic of handling variable pole sizes.
+//----------------------------------------------------------------------------
+f_pole(_a, _s, _i) =>
+    _f1 = f_filt9x(_a, _s, 1)                  // 1-pole
+    _f2 = _i >= 2 ? f_filt9x(_a, _s, 2) : na    // 2-pole
+    _f3 = _i >= 3 ? f_filt9x(_a, _s, 3) : na    // 3-pole
+    _f4 = _i >= 4 ? f_filt9x(_a, _s, 4) : na    // 4-pole
+    _f5 = _i >= 5 ? f_filt9x(_a, _s, 5) : na    // 5-pole
+    _f6 = _i >= 6 ? f_filt9x(_a, _s, 6) : na    // 6-pole
+    _f7 = _i >= 7 ? f_filt9x(_a, _s, 7) : na    // 7-pole
+    _f8 = _i >= 8 ? f_filt9x(_a, _s, 8) : na    // 8-pole
+    _f9 = _i == 9 ? f_filt9x(_a, _s, 9) : na    // 9-pole
+
+    // Based on how many poles were requested, return the relevant result:
+    _final = switch _i
+        1 => _f1
+        2 => _f2
+        3 => _f3
+        4 => _f4
+        5 => _f5
+        6 => _f6
+        7 => _f7
+        8 => _f8
+        9 => _f9
+        => na
+
+    [_final, _f1]
+
+//============================================================================
+// 3. Inputs
+//============================================================================
+src  = input.source(defval=hlc3, title="Source")
+int N = input.int(defval=4, title="Poles", minval=1, maxval=9)
+int per = input.int(defval=144, title="Sampling Period", minval=2)
+float mult = input.float(defval=1.414, title="Filtered TR Mult", minval=0)
+bool modeLag  = input.bool(defval=false, title="Reduced Lag Mode")
+bool modeFast = input.bool(defval=false, title="Fast Response Mode")
+
+//============================================================================
+// 4. Definitions
+//============================================================================
+float sqrt2    = 1.414
+float exponent = 2.0 / N
+float basePow  = math.pow(sqrt2, exponent)  // (1.414)^(2/N)
+float denom    = basePow - 1.0
+
+beta  = (1.0 - math.cos(4.0 * math.asin(1.0) / per)) / denom
+alpha = -beta + math.sqrt(beta * beta + 2.0 * beta)
+
+// Lag
+lag = (per - 1) / (2 * N)
+
+// Data
+srcdata = modeLag ? src + (src - src[lag]) : src
+trdata  = modeLag ? ta.tr(true) + (ta.tr(true) - ta.tr(true)[lag]) : ta.tr(true)
+
+// Filtered Values
+[filtn, filt1]     = f_pole(alpha, srcdata, N)
+[filtntr, filt1tr] = f_pole(alpha, trdata,  N)
+
+// Optionally average with a 1-pole filter for a faster response
+filt   = modeFast ? (filtn + filt1) / 2.0 : filtn
+filttr = modeFast ? (filtntr + filt1tr) / 2.0 : filtntr
+
+// Bands
+hband = filt + filttr * mult
+lband = filt - filttr * mult
+
+//============================================================================
+// 5. Colors
+//============================================================================
+colorUp     = color.new(#0aff68, 0)
+colorUpDark = color.new(#00752d, 0)
+colorDn     = color.new(#ff0a5a, 0)
+colorDnDark = color.new(#990032, 0)
+
+// Band color based on slope
+fcolor = filt > filt[1] ? colorUp : filt < filt[1] ? colorDn : color.gray
+
+barColor = (src > src[1]) and (src > filt) and (src < hband) ? colorUp :
+           (src > src[1]) and (src >= hband)                 ? colorUp :
+           (src <= src[1]) and (src > filt)                  ? colorUpDark :
+           (src < src[1]) and (src < filt) and (src > lband) ? colorDn :
+           (src < src[1]) and (src <= lband)                 ? colorDn :
+           (src >= src[1]) and (src < filt)                  ? colorDnDark :
+           color.gray
+
+plotFilter = plot(filt,     title="Filter", color=fcolor, linewidth=3)
+plotHigh   = plot(hband,    title="Filtered TR High Band", color=fcolor)
+plotLow    = plot(lband,    title="Filtered TR Low Band",  color=fcolor)
+fill(plotHigh, plotLow, title="Channel Fill", color=fcolor, transp=80)
+barcolor(barColor)
+
+//============================================================================
+// 6. Long-Only Strategy Logic
+//    Entry:  Price above hband + band is green
+//    Exit:   Price below lband (outside the band)
+//============================================================================
+
+// 6.1 Check the "green band" with fill color
+bool bandIsGreen = (fcolor == colorUp)
+
+// 6.2 Buy Condition
+bool buyCondition = (close > hband) and bandIsGreen
+
+// 6.3 Exit Condition: disregard band color, exit if price dips below lband
+bool exitCondition = close < lband
+
+// --- Submit LONG trades only
+if buyCondition
+    strategy.entry("Long", strategy.long)
+
+// --- Exit LONG trade
+if exitCondition and strategy.position_size > 0
+    strategy.close("Long", comment="Exit Long")
